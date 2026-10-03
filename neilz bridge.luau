@@ -1,6 +1,6 @@
 -- Neilz Bridge GUI — requires the accompanying server.mjs.
 -- Select your MCP application, match its bridge port, then Connect.
--- Right Shift: show/hide menu. Scroll the permission list for all six toggles.
+-- Right Shift: show/hide menu. Scroll the permission list for all seven toggles.
 -- HTTP request and CoreGui access must be available in your Roblox environment.
 -- Screenshots and Run scripts are disabled by default; source access is optional.
 
@@ -18,7 +18,7 @@ ScreenGui.Name = "AIMCP_Executor_Bridge"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = CoreGui
-local Permissions = { explorer = true, properties = true, localScripts = false, console = false, screenshots = false, runScripts = false }
+local Permissions = { explorer = true, properties = true, localScripts = false, console = false, screenshots = false, runScripts = false, robloxViews = false }
 local consoleEntries={}
 local SelectedProvider = nil
 local IsConnected = false
@@ -125,7 +125,7 @@ end)
 setMenuVisible(true)
 local StatusLabel=label(Frame,"Status: Disconnected",24,290,372,28,12,colors.muted)
 label(Frame,"02  ASSISTANT PERMISSIONS",24,332,372,18,10,colors.muted)
-local permissionList=make("ScrollingFrame",Frame,{Position=UDim2.fromOffset(24,358),Size=UDim2.fromOffset(372,218),CanvasSize=UDim2.fromOffset(0,336),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=colors.accent,ScrollingDirection=Enum.ScrollingDirection.Y})
+local permissionList=make("ScrollingFrame",Frame,{Position=UDim2.fromOffset(24,358),Size=UDim2.fromOffset(372,218),CanvasSize=UDim2.fromOffset(0,392),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=colors.accent,ScrollingDirection=Enum.ScrollingDirection.Y})
 local function permissionRow(key,title,description,y)
  local row=make("Frame",permissionList,{Position=UDim2.fromOffset(0,y),Size=UDim2.fromOffset(364,48),BackgroundColor3=colors.card,BorderSizePixel=0})
  round(row,10)
@@ -158,6 +158,7 @@ permissionRow("localScripts","LocalScripts","Read LocalScript source only",112)
 permissionRow("console","Console logs","Read this client's recent console messages",168)
 permissionRow("screenshots","Screenshots","Capture the foreground Roblox window",224)
 permissionRow("runScripts","Run scripts","Allow the assistant to run Lua code",280)
+permissionRow("robloxViews","Roblox Views","Focus Roblox; use Windows mouse and keys",336)
 local RequestsLabel=label(Frame,"0 requests completed",24,586,220,18,10,colors.muted)
 label(Frame,"Scroll for more",274,586,122,18,10,colors.muted)
 local ConnectionsLabel=label(Frame,"Ports 8080-9000 | AI clients: -- / 20",24,609,372,16,10,colors.muted)
@@ -246,7 +247,11 @@ local function serialize(inst, depth, budget)
     return data
 end
 local function execute(command)
-    if command.action == "authorize_screenshot" then
+    if command.action == "authorize_roblox_input" then
+        if not Permissions.robloxViews then error("Permission denied: Roblox Views is disabled") end
+        if Frame.Visible then error("Hide the Bridge menu with Right Shift before Roblox Views input") end
+        return {authorized=true}
+    elseif command.action == "authorize_screenshot" then
         if not Permissions.screenshots then error("Permission denied: Screenshots access is disabled") end
         if Frame.Visible then error("Hide the Bridge menu with Right Shift before taking a screenshot") end
         return {authorized=true}
@@ -292,7 +297,9 @@ local function execute(command)
     error("Unknown action: " .. tostring(command.action))
 end
 local function enforceResponse(command,result)
-    if command.action=="authorize_screenshot" and not Permissions.screenshots then
+    if command.action=="authorize_roblox_input" and not Permissions.robloxViews then
+        return {error="Permission denied: Roblox Views was revoked"}
+    elseif command.action=="authorize_screenshot" and not Permissions.screenshots then
         return {error="Permission denied: Screenshots access was revoked"}
     elseif command.action=="get_explorer_tree" then
         if not Permissions.explorer then return {error="Permission denied: Explorer access was revoked"} end
@@ -371,7 +378,7 @@ local function StartBridgeLoop()
             end
             local health = HttpService:JSONDecode(response.Body)
             if type(health) ~= "table" or health.bridgeListening ~= true or type(health.version) ~= "string" then error("This port is not serving the expected MCP bridge") end
-            if health.sharedProtocol~=2 then error("Update and restart the MCP server to Neilz Bridge 1.5.0") end
+            if health.sharedProtocol~=3 then error("Update and restart the MCP server to Neilz Bridge 1.6.0") end
             ConnectionsLabel.Text="Ports 8080-9000 | AI clients: "..tostring(health.connections and health.connections.active or "--").." / 20"
         end)
         if not isActive() then return end

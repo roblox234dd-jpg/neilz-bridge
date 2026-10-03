@@ -1,3 +1,5 @@
+// Roblox Views: Windows input only in Roblox Player; focus checks, no OS shortcuts.
+// Enable Roblox Views and hide the menu before input. Enable Screenshots separately to see the game.
 // Neilz Bridge MCP server — Node.js 22 or newer.
 // Install dependency beside this file: npm install @modelcontextprotocol/sdk@1.32.0
 // Codex: codex mcp add neilz-bridge -- node /absolute/path/to/server.mjs
@@ -92,6 +94,119 @@ async function captureRoblox() {
  if(!/^[A-Za-z0-9+/]+={0,2}$/.test(data) || Buffer.from(data,'base64').subarray(0,8).toString('hex')!=='89504e470d0a1a0a') throw new Error('Invalid screenshot output');
  return {type:'image',mimeType:'image/png',data};
 }
+
+const inputScript=String.raw`param([switch]$ValidateOnly)
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NeilzInput {
+ [StructLayout(LayoutKind.Sequential)] public struct RECT {public int Left,Top,Right,Bottom;}
+ [StructLayout(LayoutKind.Sequential)] public struct POINT {public int X,Y;}
+ [StructLayout(LayoutKind.Sequential)] public struct MOUSE {public int x,y;public uint data,flags,time;public UIntPtr extra;}
+ [StructLayout(LayoutKind.Sequential)] public struct KEY {public ushort vk,scan;public uint flags,time;public UIntPtr extra;}
+ [StructLayout(LayoutKind.Explicit)] public struct UNION {[FieldOffset(0)]public MOUSE mouse;[FieldOffset(0)]public KEY key;}
+ [StructLayout(LayoutKind.Sequential)] public struct INPUT {public uint type;public UNION value;}
+ [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+ [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+ [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+ [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+ [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h,int n);
+ [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h,out RECT r);
+ [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h,ref POINT p);
+ [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+ [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h,uint flags);
+ [DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
+ [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+ [DllImport("user32.dll",SetLastError=true)] public static extern uint SendInput(uint n,INPUT[] inputs,int size);
+ public static int Size(){return Marshal.SizeOf(typeof(INPUT));}
+ public static INPUT Mouse(int x,int y,uint flags){var i=new INPUT();i.type=0;i.value.mouse.x=x;i.value.mouse.y=y;i.value.mouse.flags=flags;return i;}
+ public static INPUT Key(ushort vk,bool up){var i=new INPUT();i.type=1;i.value.key.vk=vk;i.value.key.flags=(up?2u:0u)|((vk>=37&&vk<=40)?1u:0u);return i;}
+}
+'@
+if($ValidateOnly){if([NeilzInput]::Size() -ne 40 -and [NeilzInput]::Size() -ne 28){throw 'Invalid INPUT layout'};Write-Output 'Input bindings validated; no focus or input performed';exit 0}
+$command=$env:NEILZ_INPUT_REQUEST | ConvertFrom-Json
+if($command.phase -notin @('prepare','perform')){throw 'Invalid phase'}
+$candidates=@(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0})
+if($candidates.Count -ne 1){throw 'Exactly one Roblox Player window must be open; close other Roblox instances.'}
+$target=$candidates[0]
+$window=$target.MainWindowHandle
+if($command.processId -and $target.Id -ne $command.processId){throw 'Roblox process changed; action cancelled'}
+$null=[NeilzInput]::SetProcessDPIAware()
+if($command.phase -eq 'prepare'){
+ if([NeilzInput]::IsIconic($window)){$null=[NeilzInput]::ShowWindowAsync($window,9)}
+ if([NeilzInput]::GetForegroundWindow() -ne $window){$null=[NeilzInput]::SetForegroundWindow($window)}
+ for($attempt=0;$attempt -lt 10 -and [NeilzInput]::GetForegroundWindow() -ne $window;$attempt++){Start-Sleep -Milliseconds 30}
+ if([NeilzInput]::GetForegroundWindow() -ne $window){throw 'Windows did not allow focusing Roblox. Activate Roblox manually and retry.'}
+ @{processId=$target.Id;windowTitle=$target.MainWindowTitle} | ConvertTo-Json -Compress
+ exit 0
+}
+$mutex=New-Object System.Threading.Mutex($false,'Local\NeilzBridgeRobloxInput')
+$locked=$false
+try{
+ try{$locked=$mutex.WaitOne(0)}catch [System.Threading.AbandonedMutexException]{$locked=$true}
+ if(-not $locked){throw 'Another Roblox input action is running; retry shortly'}
+ if([NeilzInput]::GetForegroundWindow() -ne $window -or [NeilzInput]::IsIconic($window)){throw 'Roblox lost focus; action cancelled'}
+ foreach($modifier in @(16,17,18,91,92,1,2,4)){if(([NeilzInput]::GetAsyncKeyState($modifier) -band 0x8000) -ne 0){throw 'Release physical modifier keys and mouse buttons before AI input'}}
+ $batch=New-Object 'System.Collections.Generic.List[NeilzInput+INPUT]'
+ if($command.operation -eq 'key'){
+  $allowed=@(32,37,38,39,40)+@(48..57)+@(65..90)
+  if([int]$command.vk -notin $allowed){throw 'Unsupported key'}
+  if(([NeilzInput]::GetAsyncKeyState([int]$command.vk) -band 0x8000) -ne 0){throw 'Requested key is already physically held'}
+  $batch.Add([NeilzInput]::Key([ushort]$command.vk,$false));$batch.Add([NeilzInput]::Key([ushort]$command.vk,$true))
+ }elseif($command.operation -in @('move','click')){
+  if($null -eq $command.x -or $null -eq $command.y -or $command.x -lt 0 -or $command.x -gt 1 -or $command.y -lt 0 -or $command.y -gt 1){throw 'Coordinates must be between 0 and 1'}
+  $rect=New-Object NeilzInput+RECT;$origin=New-Object NeilzInput+POINT
+  if(-not [NeilzInput]::GetClientRect($window,[ref]$rect) -or -not [NeilzInput]::ClientToScreen($window,[ref]$origin)){throw 'Cannot locate Roblox client area'}
+  $width=$rect.Right-$rect.Left;$height=$rect.Bottom-$rect.Top
+  if($width -le 1 -or $height -le 1){throw 'Invalid client dimensions'}
+  $point=New-Object NeilzInput+POINT
+  $point.X=$origin.X+[int][Math]::Round([double]$command.x*($width-1));$point.Y=$origin.Y+[int][Math]::Round([double]$command.y*($height-1))
+  if([NeilzInput]::GetAncestor([NeilzInput]::WindowFromPoint($point),2) -ne $window){throw 'Target point is covered by another window or outside Roblox'}
+  $left=[NeilzInput]::GetSystemMetrics(76);$top=[NeilzInput]::GetSystemMetrics(77);$screenWidth=[NeilzInput]::GetSystemMetrics(78);$screenHeight=[NeilzInput]::GetSystemMetrics(79)
+  if($point.X -lt $left -or $point.Y -lt $top -or $point.X -ge $left+$screenWidth -or $point.Y -ge $top+$screenHeight){throw 'Target point is outside visible desktop'}
+  $x=[int][Math]::Round(($point.X-$left)*65535.0/($screenWidth-1));$y=[int][Math]::Round(($point.Y-$top)*65535.0/($screenHeight-1))
+  $batch.Add([NeilzInput]::Mouse($x,$y,0xC001))
+  if($command.operation -eq 'click'){
+   if($command.button -eq 'left'){$down=2;$up=4}elseif($command.button -eq 'right'){$down=8;$up=16}else{throw 'Unsupported mouse button'}
+   $batch.Add([NeilzInput]::Mouse(0,0,[uint32]$down));$batch.Add([NeilzInput]::Mouse(0,0,[uint32]$up))
+  }
+ }else{throw 'Unsupported operation'}
+ if([NeilzInput]::GetForegroundWindow() -ne $window){throw 'Roblox lost focus immediately before input; cancelled'}
+ $sent=[NeilzInput]::SendInput([uint32]$batch.Count,$batch.ToArray(),[NeilzInput]::Size())
+ if($sent -ne $batch.Count){throw 'Windows input was blocked or partially delivered. Release any held input manually before retrying.'}
+ @{submitted=$true;operation=$command.operation;processId=$target.Id;events=$sent;windowTitle=$target.MainWindowTitle} | ConvertTo-Json -Compress
+}finally{if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
+`;
+const inputKeys={Space:32,Left:37,Up:38,Right:39,Down:40};
+for(let code=65;code<=90;code++)inputKeys[String.fromCharCode(code)]=code;
+for(let code=48;code<=57;code++)inputKeys[String.fromCharCode(code)]=code;
+function validateRobloxInput(args) {
+ if(!['move','click','key'].includes(args.operation))throw new Error('operation must be move, click or key');
+ const clean={operation:args.operation};
+ if(args.operation==='key'){if(!Object.hasOwn(inputKeys,args.key))throw new Error('Allowed keys: A-Z, 0-9, Space and arrow keys');clean.vk=inputKeys[args.key];}
+ else {for(const name of ['x','y']){if(typeof args[name]!=='number'||!Number.isFinite(args[name])||args[name]<0||args[name]>1)throw new Error('x and y must be normalized coordinates from 0 to 1');clean[name]=args[name];}if(args.operation==='click'){clean.button=args.button??'left';if(!['left','right'].includes(clean.button))throw new Error('button must be left or right');}}
+ return clean;
+}
+let windowsInputBusy=false;
+async function runRobloxInput(args) {
+ const clean=validateRobloxInput(args);
+ if(process.platform!=='win32')throw new Error('Roblox Views requires Windows');
+ if(windowsInputBusy)throw new Error('An input action is already running; retry shortly');
+ windowsInputBusy=true;
+ try {
+  const authorize=async()=>{const approval=await send('authorize_roblox_input',{});if(approval?.authorized!==true)throw new Error(approval?.error||'Roblox Views permission denied');};
+  const native=async(command)=>{
+   const {stdout}=await execFileAsync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',inputScript],{windowsHide:true,timeout:10000,maxBuffer:1024*1024,env:{...process.env,NEILZ_INPUT_REQUEST:JSON.stringify(command)}});
+   return JSON.parse(stdout.trim());
+  };
+  await authorize();
+  const target=await native({phase:'prepare'});
+  await authorize();
+  return await native({...clean,phase:'perform',processId:target.processId});
+ } finally {windowsInputBusy=false;}
+}
+
 const port = Number(process.env.ROBLOX_BRIDGE_PORT || 8080);
 const endPort=Number(process.env.ROBLOX_BRIDGE_PORT_END || 9000);
 const clientId=randomUUID(), sessions=new SessionRegistry(clientId);
@@ -102,7 +217,7 @@ if(!Number.isInteger(endPort)||endPort<port||endPort>65535)throw new Error('Inva
 const pending = new Map(), queue = [];
 let lastPoll = null, lastResponse = null, bridgeError = null, retryTimer = null, stopping = false;
 let lastHttpRequest = null;
-function status() { return {name:'roblox-memory-mcp',displayName:'Neilz Bridge',sharedProtocol:2,version:'1.5.0',mode:sharedUrl?'shared':'owner',bridgeListening:bridge.listening,bridgeError,retryScheduled:retryTimer !== null,url:sharedUrl||'http://127.0.0.1:'+activePort,portRange:{start:port,end:endPort},connections:{active:sessions.count,maximum:20},lastHttpRequest,clientPolling:lastPoll !== null && Date.now()-lastPoll < 10000,lastPoll:lastPoll === null ? null : new Date(lastPoll).toISOString(),lastResponse:lastResponse === null ? null : new Date(lastResponse).toISOString(),pendingRequests:pending.size}; }
+function status() { return {name:'roblox-memory-mcp',displayName:'Neilz Bridge',sharedProtocol:3,version:'1.6.0',mode:sharedUrl?'shared':'owner',bridgeListening:bridge.listening,bridgeError,retryScheduled:retryTimer !== null,url:sharedUrl||'http://127.0.0.1:'+activePort,portRange:{start:port,end:endPort},connections:{active:sessions.count,maximum:20},lastHttpRequest,clientPolling:lastPoll !== null && Date.now()-lastPoll < 10000,lastPoll:lastPoll === null ? null : new Date(lastPoll).toISOString(),lastResponse:lastResponse === null ? null : new Date(lastResponse).toISOString(),pendingRequests:pending.size}; }
 async function sessionRequest(url,operation) {
  const response=await fetch(url+'/mcp_session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,clientId}),signal:AbortSignal.timeout(1500)});
  return {ok:response.ok,...await response.json()};
@@ -111,8 +226,8 @@ async function getStatus() {
  if(!sharedUrl) return status();
  try {
   const remote=await fetch(sharedUrl+'/health',{signal:AbortSignal.timeout(1500)}).then(r=>r.json());
-  if(remote.name!=='roblox-memory-mcp'||remote.sharedProtocol!==2) throw new Error('Shared bridge changed');
-  return {...remote,mode:'shared',localVersion:'1.5.0'};
+  if(remote.name!=='roblox-memory-mcp'||remote.sharedProtocol!==3) throw new Error('Shared bridge changed');
+  return {...remote,mode:'shared',localVersion:'1.6.0'};
  } catch(err) { return {...status(),bridgeListening:false,bridgeError:'Shared bridge unavailable: '+err.message}; }
 }
 function reply(res, code, data) { res.writeHead(code, {'Content-Type':'application/json','Cache-Control':'no-store'}); res.end(code === 204 ? undefined : JSON.stringify(data)); }
@@ -145,7 +260,7 @@ const bridge = http.createServer((req,res) => {
   }
   if(path==='/mcp_dispatch') {
    if(!sessions.renew(payload?.clientId))return reply(res,403,{error:'Registered AI session required'});
-   if(!payload || !['get_explorer_tree','read_script','get_console_logs','authorize_screenshot','run_script'].includes(payload.action)) return reply(res,400,{error:'Unknown action'});
+   if(!payload || !['get_explorer_tree','read_script','get_console_logs','authorize_screenshot','authorize_roblox_input','run_script'].includes(payload.action)) return reply(res,400,{error:'Unknown action'});
    const args=payload.payload??{};
    if(typeof args!=='object'||args===null||Array.isArray(args)) return reply(res,400,{error:'Invalid payload'});
    // Allow only known fields: a relay cannot overwrite the queue id or action.
@@ -178,7 +293,7 @@ bridge.on('error',async err=>{
  const candidate='http://127.0.0.1:'+activePort;
  try {
   const health=await fetch(candidate+'/health',{signal:AbortSignal.timeout(1000)}).then(r=>r.json());
-  if(!stopping&&health.name==='roblox-memory-mcp'&&health.sharedProtocol===2&&health.bridgeListening===true) {
+  if(!stopping&&health.name==='roblox-memory-mcp'&&health.sharedProtocol===3&&health.bridgeListening===true) {
    const registration=await sessionRequest(candidate,'register');
    if(!registration.ok){bridgeError=registration.error||'Connection limit reached';scheduleRetry();return;}
    sharedUrl=candidate;bridgeError=null;console.error('[Bridge] Sharing existing bridge at '+candidate);scheduleRetry();return;
@@ -211,7 +326,7 @@ function sendLocal(action,payload) {
   pending.set(req_id,entry); queue.push({req_id,action,...payload});
  });
 }
-const server=new Server({name:'Neilz Bridge',version:'1.5.0'},{capabilities:{tools:{}}});
+const server=new Server({name:'Neilz Bridge',version:'1.6.0'},{capabilities:{tools:{}}});
 const pathSchema={type:'string',description:'Dot-separated Studio path, e.g. Workspace or ServerScriptService.Main'};
 server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:[
  {name:'get_roblox_bridge_status',description:'Reports bridge startup errors and recent polling without consuming tasks.',inputSchema:{type:'object',properties:{}}},
@@ -219,7 +334,8 @@ server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:[
  {name:'read_roblox_script',description:'Reads source allowed by the connected client. The permission menu allows LocalScripts only.',inputSchema:{type:'object',properties:{path:pathSchema},required:['path']}},
  {name:'get_roblox_console',description:'Reads recent client console messages captured while Console logs permission is enabled.',inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:100,description:'Maximum messages to return; defaults to 50'}}}},
  {name:'get_roblox_screenshot',description:'Captures the visible client area of the foreground Roblox window on Windows. Requires Screenshots permission and a hidden Bridge menu. Returns a PNG image.',inputSchema:{type:'object',properties:{}}},
- {name:'run_roblox_script',description:'Schedules Lua code in the connected Roblox client. Requires Run scripts permission and loadstring. Result confirms scheduling, not completion. Enable Console logs to read completion/errors. Disabling permission prevents queued starts but cannot stop already running code.',inputSchema:{type:'object',properties:{source:{type:'string',minLength:1,maxLength:100000,description:'Lua source code to execute'}},required:['source']},annotations:{readOnlyHint:false,destructiveHint:true}}
+ {name:'run_roblox_script',description:'Schedules Lua code in the connected Roblox client. Requires Run scripts permission and loadstring. Result confirms scheduling, not completion. Enable Console logs to read completion/errors. Disabling permission prevents queued starts but cannot stop already running code.',inputSchema:{type:'object',properties:{source:{type:'string',minLength:1,maxLength:100000,description:'Lua source code to execute'}},required:['source']},annotations:{readOnlyHint:false,destructiveHint:true}},
+ {name:'roblox_view_input',description:'Windows input scoped to a single Roblox Player window. Requires Roblox Views permission and a hidden Bridge menu. Activates Roblox, verifies focus, then moves/clicks the Windows cursor or taps a gameplay key. x/y are normalized 0..1 coordinates in the Roblox client area. Only A-Z, 0-9, Space and arrow keys; no key holds or OS shortcuts. Refuses multiple Roblox windows, lost focus and covered click targets. Submitted input does not confirm the game handled it.',inputSchema:{type:'object',properties:{operation:{type:'string',enum:['move','click','key']},x:{type:'number',minimum:0,maximum:1},y:{type:'number',minimum:0,maximum:1},button:{type:'string',enum:['left','right']},key:{type:'string',enum:Object.keys(inputKeys)}},required:['operation']},annotations:{readOnlyHint:false,destructiveHint:true}}
 ]}));
 server.setRequestHandler(CallToolRequestSchema,async({params:{name,arguments:args={}}})=>{
  try {
@@ -231,6 +347,7 @@ server.setRequestHandler(CallToolRequestSchema,async({params:{name,arguments:arg
    else if(name==='read_roblox_script') { if(!args.path) throw new Error('path is required'); data=await send('read_script',{path:args.path}); }
    else if(name==='get_roblox_console') { const limit=args.limit??50; if(!Number.isInteger(limit)||limit<1||limit>100) throw new Error('limit must be an integer from 1 to 100'); data=await send('get_console_logs',{limit}); }
    else if(name==='run_roblox_script') { if(typeof args.source!=='string'||Buffer.byteLength(args.source)<1||Buffer.byteLength(args.source)>100000) throw new Error('source must contain 1 to 100000 UTF-8 bytes'); data=await send('run_script',{source:args.source}); }
+   else if(name==='roblox_view_input') data=await runRobloxInput(args);
    else if(name==='get_roblox_screenshot') {
     const authorize=async()=>{const approval=await send('authorize_screenshot',{});if(approval?.authorized!==true) throw new Error(approval?.error||'Screenshots permission denied');};
     await authorize();
