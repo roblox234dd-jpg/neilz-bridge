@@ -1,7 +1,7 @@
 // Neilz Bridge MCP server — Node.js 22 or newer.
 // Install dependency beside this file: npm install @modelcontextprotocol/sdk@1.32.0
 // Codex: codex mcp add neilz-bridge -- node /absolute/path/to/server.mjs
-// Run ils Bridge.luau in your authorized Roblox environment.
+// Run neilz bridge.luau in your authorized Roblox environment.
 // Default ports: 8080–9000. Maximum: 20 AI clients per shared bridge.
 // Enable permissions in the GUI. Right Shift hides/shows the menu.
 // Environment: ROBLOX_BRIDGE_PORT, ROBLOX_BRIDGE_PORT_END, ROBLOX_BRIDGE_TIMEOUT_MS.
