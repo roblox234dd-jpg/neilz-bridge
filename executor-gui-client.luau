@@ -1,3 +1,9 @@
+-- Neilz Bridge GUI — requires the accompanying server.mjs.
+-- Select your MCP application, match its bridge port, then Connect.
+-- Right Shift: show/hide menu. Scroll the permission list for all six toggles.
+-- HTTP request and CoreGui access must be available in your Roblox environment.
+-- Screenshots and Run scripts are disabled by default; source access is optional.
+
 -- Roblox AI Bridge: provider selection and enforced client-side permissions.
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
